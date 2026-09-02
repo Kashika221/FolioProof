@@ -1,0 +1,35 @@
+# --- secrets ---------------------------------------------------------------
+.env
+.env.local
+frontend/.env.local
+
+# --- python ----------------------------------------------------------------
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+*.egg-info/
+
+# --- runtime data (regenerable) --------------------------------------------
+# Uploaded PDFs and rendered page images belong to a build, not the repo.
+backend/data/uploads/*
+backend/data/cache/*
+!backend/data/uploads/.gitkeep
+!backend/data/cache/.gitkeep
+
+# Generated test fixtures — recreate with tests/make_sample_*.py
+backend/tests/fixtures/
+
+# --- node / next -----------------------------------------------------------
+node_modules/
+.next/
+out/
+dist/
+*.tsbuildinfo
+next-env.d.ts
+
+# --- editors / os ----------------------------------------------------------
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/

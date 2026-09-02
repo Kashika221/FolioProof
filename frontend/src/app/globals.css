@@ -1,0 +1,293 @@
+@import "tailwindcss";
+
+/* ---------------------------------------------------------------------------
+   FolioProof design tokens.
+
+   Lineage is LaunchMyFolio: Inter, white ground, Tailwind's neutral ramp,
+   green-500 as the single accent, pill and 12-16px radii, no gradients on
+   surfaces. Green does double duty here -- it is also the "verified" colour,
+   which is the one idea the whole product is about. Red is reserved
+   exclusively for unsupported claims; it never appears as decoration.
+--------------------------------------------------------------------------- */
+
+:root {
+  --bg: #ffffff;
+  --surface: #f9fafb;
+  --surface-2: #f3f4f6;
+  --border: #e5e7eb;
+  --border-strong: #d1d5db;
+  --fg: #111827;
+  --fg-muted: #6b7280;
+  --fg-subtle: #9ca3af;
+
+  --accent: #22c55e;
+  --accent-hover: #16a34a;
+  --accent-press: #15803d;
+  --accent-tint: #f0fdf4;
+  --accent-ring: rgba(34, 197, 94, 0.35);
+
+  --danger: #ef4444;
+  --danger-tint: #fef2f2;
+  --warn: #f59e0b;
+  --warn-tint: #fffbeb;
+  --info: #2563eb;
+
+  --shadow-sm: 0 1px 2px rgba(16, 24, 40, 0.05);
+  --shadow-md: 0 4px 16px rgba(16, 24, 40, 0.08);
+  --shadow-lg: 0 16px 48px rgba(16, 24, 40, 0.12);
+}
+
+.dark {
+  --bg: #0a0c0f;
+  --surface: #11151a;
+  --surface-2: #161b22;
+  --border: #222a33;
+  --border-strong: #2f3945;
+  --fg: #f3f4f6;
+  --fg-muted: #9ca3af;
+  --fg-subtle: #6b7280;
+
+  --accent: #22c55e;
+  --accent-hover: #4ade80;
+  --accent-press: #16a34a;
+  --accent-tint: rgba(34, 197, 94, 0.12);
+  --accent-ring: rgba(34, 197, 94, 0.4);
+
+  --danger: #f87171;
+  --danger-tint: rgba(248, 113, 113, 0.12);
+  --warn: #fbbf24;
+  --warn-tint: rgba(251, 191, 36, 0.12);
+  --info: #60a5fa;
+
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 4px 16px rgba(0, 0, 0, 0.5);
+  --shadow-lg: 0 16px 48px rgba(0, 0, 0, 0.6);
+}
+
+@theme inline {
+  --color-bg: var(--bg);
+  --color-surface: var(--surface);
+  --color-surface-2: var(--surface-2);
+  --color-border: var(--border);
+  --color-border-strong: var(--border-strong);
+  --color-fg: var(--fg);
+  --color-fg-muted: var(--fg-muted);
+  --color-fg-subtle: var(--fg-subtle);
+  --color-accent: var(--accent);
+  --color-accent-hover: var(--accent-hover);
+  --color-accent-tint: var(--accent-tint);
+  --color-danger: var(--danger);
+  --color-danger-tint: var(--danger-tint);
+  --color-warn: var(--warn);
+  --color-warn-tint: var(--warn-tint);
+  --color-info: var(--info);
+  --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+
+* {
+  border-color: var(--border);
+}
+
+html {
+  scroll-behavior: smooth;
+}
+
+body {
+  background: var(--bg);
+  color: var(--fg);
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: var(--accent-ring);
+}
+
+/* Focus ring — visible, consistent, never removed. */
+:where(button, a, input, select, textarea, [tabindex]):focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+  border-radius: 8px;
+}
+
+/* --- component primitives ------------------------------------------------ */
+
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 16px;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  padding: 10px 18px;
+  border-radius: 999px;
+  font-size: 14px;
+  font-weight: 600;
+  transition: background 140ms ease, color 140ms ease, border-color 140ms ease,
+    transform 140ms ease, box-shadow 140ms ease;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.btn:active:not(:disabled) {
+  transform: translateY(1px);
+}
+.btn:disabled {
+  opacity: 0.45;
+  cursor: not-allowed;
+}
+
+.btn-primary {
+  background: var(--accent);
+  color: #052e13;
+  box-shadow: var(--shadow-sm);
+}
+.btn-primary:hover:not(:disabled) {
+  background: var(--accent-hover);
+  box-shadow: var(--shadow-md);
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--fg);
+  border: 1px solid var(--border-strong);
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--surface-2);
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 11px;
+  border-radius: 999px;
+  font-size: 12.5px;
+  font-weight: 500;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+}
+
+.field {
+  width: 100%;
+  padding: 11px 14px;
+  border-radius: 12px;
+  background: var(--bg);
+  border: 1px solid var(--border-strong);
+  font-size: 14.5px;
+  color: var(--fg);
+  transition: border-color 140ms ease, box-shadow 140ms ease;
+}
+.field:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-ring);
+}
+.field::placeholder {
+  color: var(--fg-subtle);
+}
+
+/* --- provenance ---------------------------------------------------------- */
+
+.sentence {
+  border-radius: 4px;
+  padding: 1px 2px;
+  cursor: pointer;
+  transition: background 120ms ease, box-shadow 120ms ease;
+}
+.sentence:hover,
+.sentence[data-active="true"] {
+  background: var(--accent-tint);
+  box-shadow: inset 0 -2px 0 var(--accent);
+}
+
+/* Box drawn over the rendered PDF page. */
+.evidence-box {
+  position: absolute;
+  border: 2px solid var(--accent);
+  background: rgba(34, 197, 94, 0.16);
+  border-radius: 3px;
+  pointer-events: none;
+  animation: boxIn 220ms cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes boxIn {
+  from {
+    opacity: 0;
+    transform: scale(1.06);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+/* --- motion -------------------------------------------------------------- */
+
+@keyframes fadeUp {
+  from {
+    opacity: 0;
+    transform: translateY(10px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+.fade-up {
+  animation: fadeUp 420ms cubic-bezier(0.22, 1, 0.36, 1) both;
+}
+
+@keyframes shimmer {
+  100% {
+    transform: translateX(100%);
+  }
+}
+.skeleton {
+  position: relative;
+  overflow: hidden;
+  background: var(--surface-2);
+  border-radius: 8px;
+}
+.skeleton::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  transform: translateX(-100%);
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.35),
+    transparent
+  );
+  animation: shimmer 1.4s infinite;
+}
+.dark .skeleton::after {
+  background: linear-gradient(
+    90deg,
+    transparent,
+    rgba(255, 255, 255, 0.06),
+    transparent
+  );
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Subtle dotted ground for the hero, drawn with a mask so it fades out. */
+.dotfield {
+  background-image: radial-gradient(var(--border-strong) 1px, transparent 1px);
+  background-size: 22px 22px;
+  -webkit-mask-image: radial-gradient(ellipse 70% 60% at 50% 0%, #000 40%, transparent 100%);
+  mask-image: radial-gradient(ellipse 70% 60% at 50% 0%, #000 40%, transparent 100%);
+}
