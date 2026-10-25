@@ -505,7 +505,6 @@ body.provenance-on [data-provenance] {{
   border-radius: 3px;
 }}
 
-
 .footer-note {{ font-size: 12.5px; color: var(--muted); margin-top: 28px; }}
 
 @media print {{

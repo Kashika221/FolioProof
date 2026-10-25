@@ -45,10 +45,8 @@ _BULLET_RE = re.compile(r"^\s*[•‣▪●·⁃\-\*–—]\s*")
 # "(cid:NNN)". They are almost always bullets or dingbats, so drop them.
 _CID_RE = re.compile(r"\(cid:\d+\)")
 
-
 def _normalise_heading(text: str) -> str:
     return _NORMALISE_RE.sub("", text.lower()).strip()
-
 
 def _contains(haystack: str, needle: str) -> bool:
     """Substring test that respects token boundaries for short needles.
@@ -73,7 +71,6 @@ def _contains(haystack: str, needle: str) -> bool:
         start = idx + 1
     return False
 
-
 @dataclass
 class TextLine:
     """One visual line of the document, with its position on the page."""
@@ -90,12 +87,12 @@ class TextLine:
 
     def span(self) -> PDFSpan:
         return PDFSpan(
-            page=self.page,
-            x0=self.x0,
-            top=self.top,
-            x1=self.x1,
-            bottom=self.bottom,
-            line_index=self.index,
+            page = self.page,
+            x0 = self.x0,
+            top = self.top,
+            x1 = self.x1,
+            bottom = self.bottom,
+            line_index = self.index,
         )
 
     @property
@@ -109,7 +106,6 @@ class TextLine:
     def clean(self) -> str:
         text = _CID_RE.sub(" ", self.text)
         return _BULLET_RE.sub("", " ".join(text.split())).strip()
-
 
 @dataclass
 class Section:
@@ -136,7 +132,6 @@ class Section:
                 if best is None or score > best[0]:
                     best = (score, line)
         return best[1].span() if best else None
-
 
 @dataclass
 class ParsedPDF:
@@ -190,13 +185,12 @@ class ParsedPDF:
         line = self.find_line(needle)
         return line.span() if line else None
 
-
 def _lines_from_page(page: pdfplumber.page.Page, page_no: int, start_index: int) -> list[TextLine]:
     """Group pdfplumber words into visual lines, merging their bounding boxes."""
     words = page.extract_words(
-        use_text_flow=False,
-        keep_blank_chars=False,
-        extra_attrs=["size", "fontname"],
+        use_text_flow = False,
+        keep_blank_chars = False,
+        extra_attrs = ["size", "fontname"],
     )
     if not words:
         return []
@@ -208,7 +202,7 @@ def _lines_from_page(page: pdfplumber.page.Page, page_no: int, start_index: int)
     tol = max(median_h * 0.6, 2.0)
 
     buckets: list[list[dict]] = []
-    for w in sorted(words, key=lambda w: (round(w["top"], 1), w["x0"])):
+    for w in sorted(words, key = lambda w: (round(w["top"], 1), w["x0"])):
         placed = False
         for bucket in buckets:
             if abs(bucket[0]["top"] - w["top"]) <= tol:
@@ -227,19 +221,18 @@ def _lines_from_page(page: pdfplumber.page.Page, page_no: int, start_index: int)
         fontnames = " ".join(str(w.get("fontname", "")) for w in bucket).lower()
         lines.append(
             TextLine(
-                text=text,
-                page=page_no,
-                x0=min(w["x0"] for w in bucket),
-                top=min(w["top"] for w in bucket),
-                x1=max(w["x1"] for w in bucket),
-                bottom=max(w["bottom"] for w in bucket),
-                index=start_index + i,
-                size=max(float(w.get("size", 0) or 0) for w in bucket),
-                bold=("bold" in fontnames or "black" in fontnames or "semib" in fontnames),
+                text = text,
+                page = page_no,
+                x0 = min(w["x0"] for w in bucket),
+                top = min(w["top"] for w in bucket),
+                x1 = max(w["x1"] for w in bucket),
+                bottom = max(w["bottom"] for w in bucket),
+                index = start_index + i,
+                size = max(float(w.get("size", 0) or 0) for w in bucket),
+                bold = ("bold" in fontnames or "black" in fontnames or "semib" in fontnames),
             )
         )
     return lines
-
 
 def _looks_like_heading(line: TextLine, body_size: float) -> bool:
     text = line.clean
@@ -253,7 +246,6 @@ def _looks_like_heading(line: TextLine, body_size: float) -> bool:
     bigger = line.size > body_size + 0.4
     shouty = text.isupper() and len(text) > 2
     return bool(line.bold or bigger or shouty)
-
 
 def _segment_sections(lines: list[TextLine]) -> dict[str, Section]:
     """Split the document into named sections using heading heuristics."""
@@ -291,7 +283,6 @@ def _segment_sections(lines: list[TextLine]) -> dict[str, Section]:
 
     return sections
 
-
 def parse_pdf(path: str | Path) -> ParsedPDF:
     """Extract lines, boxes and sections from a PDF."""
     path = Path(path)
@@ -310,9 +301,9 @@ def parse_pdf(path: str | Path) -> ParsedPDF:
         )
 
     return ParsedPDF(
-        path=str(path),
-        page_count=len(page_sizes),
-        page_sizes=page_sizes,
-        lines=lines,
-        sections=_segment_sections(lines),
+        path = str(path),
+        page_count = len(page_sizes),
+        page_sizes = page_sizes,
+        lines = lines,
+        sections = _segment_sections(lines),
     )

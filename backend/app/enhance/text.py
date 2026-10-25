@@ -15,14 +15,12 @@ _MD_PATTERNS = [
     (re.compile(r"^\s*[-+*]\s+", re.M), ""),        # list bullets
 ]
 
-
 def split_sentences(text: str) -> list[str]:
     """Split a passage into sentences."""
     text = " ".join((text or "").split())
     if not text:
         return []
     return [s.strip() for s in _SENTENCE_RE.split(text) if s.strip()]
-
 
 def strip_markdown(text: str) -> str:
     """Flatten README markdown into prose.

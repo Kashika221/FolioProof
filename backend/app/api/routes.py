@@ -8,7 +8,9 @@ from __future__ import annotations
 
 import base64
 import logging
-import shutil
+import io
+
+import tempfile
 import uuid
 import zipfile
 from datetime import datetime, timezone
@@ -16,10 +18,11 @@ from pathlib import Path
 from typing import Any
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
-from fastapi.responses import HTMLResponse, FileResponse, JSONResponse
+from fastapi.responses import HTMLResponse, JSONResponse, Response
 from pydantic import BaseModel
 
 from app.config import settings
+from app.db.files import get_file_store
 from app.db.mongo import get_repository
 from app.generate.portfolio import render_bundle, render_portfolio
 from app.generate.themes import SECTIONS, THEMES, ThemeConfig
@@ -32,15 +35,12 @@ router = APIRouter(prefix="/api")
 ALLOWED_SUFFIXES = {".pdf"}
 MAX_UPLOAD_BYTES = 10 * 1024 * 1024
 
-
 # ---------------------------------------------------------------------------
 # storage helpers
 # ---------------------------------------------------------------------------
 
-
 def _save(build_id: str, payload: dict[str, Any]) -> None:
     get_repository().save(build_id, payload)
-
 
 def _load(build_id: str) -> dict[str, Any]:
     record = get_repository().get(build_id)
@@ -48,35 +48,27 @@ def _load(build_id: str) -> dict[str, Any]:
         raise HTTPException(404, f"unknown build id {build_id}")
     return record
 
-
 def _graph_of(record: dict[str, Any]) -> ProfileGraph:
     return ProfileGraph.model_validate(record["graph"])
 
-
-def _store_upload(file: UploadFile, build_id: str, label: str) -> Path:
+def _read_upload(file: UploadFile, label: str) -> bytes:
+    """Read an uploaded PDF into memory, enforcing type and size."""
     suffix = Path(file.filename or "").suffix.lower()
     if suffix not in ALLOWED_SUFFIXES:
         raise HTTPException(400, f"{label}: only PDF uploads are supported (got {suffix or 'none'})")
 
-    dest_dir = settings.upload_path / build_id
-    dest_dir.mkdir(parents=True, exist_ok=True)
-    dest = dest_dir / f"{label}{suffix}"
-
-    size = 0
-    with dest.open("wb") as out:
-        while chunk := file.file.read(1 << 20):
-            size += len(chunk)
-            if size > MAX_UPLOAD_BYTES:
-                dest.unlink(missing_ok=True)
-                raise HTTPException(400, f"{label}: file exceeds 10 MB")
-            out.write(chunk)
-    return dest
-
+    data = b""
+    while chunk := file.file.read(1 << 20):
+        data += chunk
+        if len(data) > MAX_UPLOAD_BYTES:
+            raise HTTPException(400, f"{label}: file exceeds 10 MB")
+    if not data:
+        raise HTTPException(400, f"{label}: file is empty")
+    return data
 
 # ---------------------------------------------------------------------------
 # themes
 # ---------------------------------------------------------------------------
-
 
 @router.get("/themes")
 def list_themes() -> dict[str, Any]:
@@ -94,11 +86,9 @@ def list_themes() -> dict[str, Any]:
         ],
     }
 
-
 # ---------------------------------------------------------------------------
 # build
 # ---------------------------------------------------------------------------
-
 
 @router.post("/build")
 async def build(
@@ -110,27 +100,75 @@ async def build(
 ) -> JSONResponse:
     """Ingest every supplied source and produce a fused profile."""
     build_id = uuid.uuid4().hex[:12]
+    store = get_file_store()
 
-    resume_path = _store_upload(resume, build_id, "resume")
-    linkedin_path = _store_upload(linkedin, build_id, "linkedin") if linkedin else None
-    cover_path = _store_upload(cover_letter, build_id, "cover_letter") if cover_letter else None
+    sources: dict[str, bytes] = {"resume": _read_upload(resume, "resume")}
+    if linkedin:
+        sources["linkedin"] = _read_upload(linkedin, "linkedin")
+    if cover_letter:
+        sources["cover_letter"] = _read_upload(cover_letter, "cover_letter")
 
-    result = build_profile(BuildInputs(
-        resume_path=resume_path,
-        linkedin_path=linkedin_path,
-        cover_letter_path=cover_path,
-        github_username=github_username.strip() or None,
-        max_repos=max(1, min(max_repos, 30)),
-    ))
+    # The pipeline reads PDFs from paths, so stage them in a temp directory for
+    # the duration of the build. Durable storage happens afterwards -- nothing
+    # is persisted for a build that fails.
+    with tempfile.TemporaryDirectory(prefix=f"folioproof-{build_id}-") as tmp:
+        staged = {}
+        for label, data in sources.items():
+            path = Path(tmp) / f"{label}.pdf"
+            path.write_bytes(data)
+            staged[label] = path
 
-    # A build with no claims means the one LLM call failed -- almost always an
-    # exhausted Groq quota. Saving it produces a page that reads "Your Name /
-    # Developer", which looks like a bug in the generator rather than a quota
-    # that resets on its own. Fail with the reset time instead.
-    if not result.graph.claims:
-        shutil.rmtree(settings.upload_path / build_id, ignore_errors=True)
-        detail = result.warnings[0] if result.warnings else "extraction produced nothing"
-        raise HTTPException(503, detail)
+        try:
+            result = build_profile(BuildInputs(
+                resume_path=staged["resume"],
+                linkedin_path=staged.get("linkedin"),
+                cover_letter_path=staged.get("cover_letter"),
+                github_username=github_username.strip() or None,
+                max_repos=max(1, min(max_repos, 30)),
+            ))
+        except ValueError as exc:
+            # parse_pdf raises this on a scanned/empty résumé — surface a
+            # clean 400 rather than a 500 with a stack trace.
+            raise HTTPException(400, f"résumé: {exc}") from exc
+        except Exception as exc:
+            log.exception("build_profile crashed for %s", build_id)
+            raise HTTPException(
+                500,
+                f"Build failed unexpectedly: {type(exc).__name__}. "
+                "The server logs have the details.",
+            ) from exc
+
+        # A build with no claims means every fallback in the extraction ladder
+        # failed — usually an exhausted Groq daily quota, an invalid API key,
+        # or a résumé the parser could not read. Fail with a friendly reason
+        # rather than saving a page that reads "Your Name / Developer".
+        if not result.graph.claims:
+            detail = result.warnings[0] if result.warnings else (
+                "We couldn't extract anything from your documents. "
+                "Check that your résumé is a text-based (not scanned) PDF, "
+                "and that the backend has a valid GROQ_API_KEY."
+            )
+            raise HTTPException(503, detail)
+
+        # Persist the originals somewhere that survives a restart, and rewrite
+        # each document's pointer from the temp path to that reference. If the
+        # file store is unreachable we log and continue — the profile is still
+        # usable, just without downloadable originals.
+        for doc in result.graph.documents:
+            data = sources.get(doc.source_id)
+            if data is None:
+                continue
+            try:
+                doc.stored_path = store.put(
+                    build_id, doc.source_id, f"{doc.source_id}.pdf",
+                    data, "application/pdf",
+                )
+            except Exception as exc:
+                log.error("failed to persist %s for %s: %s", doc.source_id, build_id, exc)
+                result.warnings.append(
+                    f"Could not archive the {doc.source_id} PDF; "
+                    "the download link and provenance overlay will be unavailable."
+                )
 
     record = {
         "build_id": build_id,
@@ -143,7 +181,13 @@ async def build(
         "warnings": result.warnings,
         "theme": ThemeConfig().model_dump(),
     }
-    _save(build_id, record)
+    try:
+        _save(build_id, record)
+    except Exception as exc:
+        log.exception("failed to persist build %s", build_id)
+        raise HTTPException(
+            500, f"Build succeeded but could not be saved: {type(exc).__name__}"
+        ) from exc
 
     return JSONResponse({
         "build_id": build_id,
@@ -154,16 +198,13 @@ async def build(
         "preview_url": f"/api/preview/{build_id}",
     })
 
-
 @router.get("/profile/{build_id}")
 def get_profile(build_id: str) -> dict[str, Any]:
     return _load(build_id)
 
-
 # ---------------------------------------------------------------------------
 # provenance
 # ---------------------------------------------------------------------------
-
 
 @router.get("/profile/{build_id}/provenance")
 def provenance(build_id: str) -> dict[str, Any]:
@@ -199,7 +240,6 @@ def provenance(build_id: str) -> dict[str, Any]:
         ],
     }
 
-
 # ---------------------------------------------------------------------------
 # gallery -- user-uploaded images only
 # ---------------------------------------------------------------------------
@@ -212,17 +252,14 @@ IMAGE_MIME = {
 MAX_IMAGE_BYTES = 5 * 1024 * 1024
 MAX_GALLERY_IMAGES = 24
 
-
 def _gallery_dir(build_id: str) -> Path:
     d = settings.upload_path / build_id / "gallery"
     d.mkdir(parents=True, exist_ok=True)
     return d
 
-
 @router.get("/profile/{build_id}/gallery")
 def list_gallery(build_id: str) -> dict[str, Any]:
     return {"gallery": _load(build_id).get("gallery") or []}
-
 
 @router.post("/profile/{build_id}/gallery")
 async def add_gallery_images(
@@ -247,7 +284,7 @@ async def add_gallery_images(
         )
 
     caption_list = [c.strip() for c in captions.split("\n")] if captions else []
-    dest_dir = _gallery_dir(build_id)
+    store = get_file_store()
     added: list[dict[str, Any]] = []
 
     for i, image in enumerate(images):
@@ -259,32 +296,33 @@ async def add_gallery_images(
                 f"(allowed: {', '.join(sorted(IMAGE_SUFFIXES))})",
             )
 
-        image_id = uuid.uuid4().hex[:10]
-        dest = dest_dir / f"{image_id}{suffix}"
+        data = b""
+        while chunk := await image.read(1 << 20):
+            data += chunk
+            if len(data) > MAX_IMAGE_BYTES:
+                raise HTTPException(400, f"{image.filename!r} exceeds 5 MB")
 
-        size = 0
-        with dest.open("wb") as out:
-            while chunk := await image.read(1 << 20):
-                size += len(chunk)
-                if size > MAX_IMAGE_BYTES:
-                    dest.unlink(missing_ok=True)
-                    raise HTTPException(400, f"{image.filename!r} exceeds 5 MB")
-                out.write(chunk)
+        image_id = uuid.uuid4().hex[:10]
+        filename = f"{image_id}{suffix}"
+        ref = store.put(
+            build_id, "gallery", filename, data,
+            IMAGE_MIME.get(suffix, "image/png"),
+        )
 
         caption = caption_list[i] if i < len(caption_list) else ""
         added.append({
             "id": image_id,
-            "filename": dest.name,
+            "filename": filename,
+            "ref": ref,
             "original_name": image.filename,
             "caption": caption or Path(image.filename or "").stem.replace("_", " "),
-            "url": f"/api/profile/{build_id}/gallery/{dest.name}",
+            "url": f"/api/profile/{build_id}/gallery/{filename}",
             "uploaded_at": datetime.now(timezone.utc).isoformat(),
         })
 
     gallery.extend(added)
     get_repository().update_fields(build_id, {"gallery": gallery})
     return {"ok": True, "added": len(added), "gallery": gallery}
-
 
 @router.patch("/profile/{build_id}/gallery/{image_id}")
 def update_caption(build_id: str, image_id: str, caption: str = Form(...)) -> dict[str, Any]:
@@ -297,7 +335,6 @@ def update_caption(build_id: str, image_id: str, caption: str = Form(...)) -> di
     get_repository().update_fields(build_id, {"gallery": gallery})
     return {"ok": True, "image": item}
 
-
 @router.delete("/profile/{build_id}/gallery/{image_id}")
 def delete_gallery_image(build_id: str, image_id: str) -> dict[str, Any]:
     record = _load(build_id)
@@ -306,74 +343,96 @@ def delete_gallery_image(build_id: str, image_id: str) -> dict[str, Any]:
     if item is None:
         raise HTTPException(404, f"unknown image {image_id}")
 
-    (_gallery_dir(build_id) / item["filename"]).unlink(missing_ok=True)
+    get_file_store().delete(item.get("ref") or str(_gallery_dir(build_id) / item["filename"]))
     gallery = [g for g in gallery if g["id"] != image_id]
     get_repository().update_fields(build_id, {"gallery": gallery})
     return {"ok": True, "gallery": gallery}
 
-
 @router.get("/profile/{build_id}/gallery/{filename}")
-def gallery_image(build_id: str, filename: str) -> FileResponse:
-    # Resolve inside the gallery directory so a crafted filename cannot walk out.
-    base = _gallery_dir(build_id).resolve()
-    path = (base / Path(filename).name).resolve()
-    if not str(path).startswith(str(base)) or not path.exists():
+def gallery_image(build_id: str, filename: str) -> Response:
+    """Serve a gallery image from wherever it is stored."""
+    safe = Path(filename).name          # never let a crafted name walk out
+    item = next(
+        (g for g in (_load(build_id).get("gallery") or []) if g["filename"] == safe),
+        None,
+    )
+    if item is None:
         raise HTTPException(404, "image not found")
-    return FileResponse(path, media_type=IMAGE_MIME.get(path.suffix.lower(), "image/png"))
 
+    # Older records predate `ref` and stored files on disk by path.
+    ref = item.get("ref") or str(_gallery_dir(build_id) / safe)
+    data = get_file_store().read(ref)
+    if data is None:
+        raise HTTPException(404, "image not found")
+
+    return Response(
+        content=data,
+        media_type=IMAGE_MIME.get(Path(safe).suffix.lower(), "image/png"),
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 @router.get("/profile/{build_id}/page/{source_id}/{page_no}")
-def source_page_image(build_id: str, source_id: str, page_no: int, scale: float = 2.0) -> FileResponse:
-    """Render one page of an uploaded PDF to PNG.
+def source_page_image(build_id: str, source_id: str, page_no: int, scale: float = 2.0) -> Response:
+    """Render one page of a stored PDF to PNG.
 
     The provenance viewer overlays absolutely-positioned boxes on this image.
     Rendering server-side with pypdfium2 avoids shipping a PDF engine to the
-    browser, and the returned `page_size` from /provenance lets the client map
+    browser, and the `page_sizes` returned by /provenance let the client map
     PDF points to image pixels exactly.
     """
     import pypdfium2 as pdfium
 
     graph = _graph_of(_load(build_id))
     doc = next((d for d in graph.documents if d.source_id == source_id), None)
-    if not doc or not doc.stored_path or not Path(doc.stored_path).exists():
+    if doc is None:
         raise HTTPException(404, f"no stored document for source {source_id}")
     if not 0 <= page_no < doc.page_count:
         raise HTTPException(404, f"page {page_no} out of range (0..{doc.page_count - 1})")
 
+    data = get_file_store().read(doc.stored_path)
+    if data is None:
+        raise HTTPException(404, f"source file for {source_id} is no longer available")
+
     scale = max(1.0, min(scale, 4.0))
-    out_dir = settings.cache_path / "pages" / build_id
-    out_dir.mkdir(parents=True, exist_ok=True)
-    out = out_dir / f"{source_id}-{page_no}@{scale:g}.png"
+    buf = io.BytesIO()
+    pdf = pdfium.PdfDocument(data)
+    try:
+        pdf[page_no].render(scale=scale).to_pil().save(buf, format="PNG")
+    finally:
+        pdf.close()
 
-    if not out.exists():
-        pdf = pdfium.PdfDocument(doc.stored_path)
-        try:
-            pdf[page_no].render(scale=scale).to_pil().save(out)
-        finally:
-            pdf.close()
-
-    return FileResponse(out, media_type="image/png")
-
+    return Response(
+        content=buf.getvalue(),
+        media_type="image/png",
+        headers={"Cache-Control": "public, max-age=86400"},
+    )
 
 @router.get("/profile/{build_id}/source/{source_id}")
-def source_document(build_id: str, source_id: str) -> FileResponse:
-    """Serve an original upload so the viewer can draw boxes over it."""
+def source_document(build_id: str, source_id: str) -> Response:
+    """Serve an original upload (the "Download résumé" link)."""
     graph = _graph_of(_load(build_id))
     doc = next((d for d in graph.documents if d.source_id == source_id), None)
-    if not doc or not doc.stored_path or not Path(doc.stored_path).exists():
+    if doc is None:
         raise HTTPException(404, f"no stored document for source {source_id}")
-    return FileResponse(doc.stored_path, media_type="application/pdf", filename=doc.filename)
 
+    data = get_file_store().read(doc.stored_path)
+    if data is None:
+        raise HTTPException(404, f"source file for {source_id} is no longer available")
+
+    name = doc.filename or f"{source_id}.pdf"
+    return Response(
+        content=data,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'},
+    )
 
 # ---------------------------------------------------------------------------
 # conflicts
 # ---------------------------------------------------------------------------
 
-
 class ResolveRequest(BaseModel):
     conflict_id: str
     value: str
-
 
 @router.post("/profile/{build_id}/resolve")
 def resolve_conflict(build_id: str, req: ResolveRequest) -> dict[str, Any]:
@@ -390,15 +449,12 @@ def resolve_conflict(build_id: str, req: ResolveRequest) -> dict[str, Any]:
     get_repository().update_fields(build_id, {"graph": graph.model_dump(mode="json")})
     return {"ok": True, "conflict": conflict.model_dump(mode="json")}
 
-
 # ---------------------------------------------------------------------------
 # render
 # ---------------------------------------------------------------------------
 
-
 class RenderRequest(BaseModel):
     theme: ThemeConfig = ThemeConfig()
-
 
 @router.post("/profile/{build_id}/theme")
 def set_theme(build_id: str, req: RenderRequest) -> dict[str, Any]:
@@ -407,7 +463,6 @@ def set_theme(build_id: str, req: RenderRequest) -> dict[str, Any]:
         raise HTTPException(404, f"unknown build id {build_id}")
     return {"ok": True, "theme": theme}
 
-
 @router.get("/preview/{build_id}", response_class=HTMLResponse)
 def preview(build_id: str) -> HTMLResponse:
     record = _load(build_id)
@@ -415,16 +470,15 @@ def preview(build_id: str) -> HTMLResponse:
     config = ThemeConfig.model_validate(record.get("theme") or {})
     html = render_portfolio(
         graph, config,
-        analytics=record.get("analytics"),
-        repositories=record.get("repositories"),
-        gallery=record.get("gallery"),
-        resume_url=f"/api/profile/{build_id}/source/resume",
+        analytics = record.get("analytics"),
+        repositories = record.get("repositories"),
+        gallery = record.get("gallery"),
+        resume_url = f"/api/profile/{build_id}/source/resume",
     )
     return HTMLResponse(html)
 
-
 @router.get("/export/{build_id}")
-def export(build_id: str) -> FileResponse:
+def export(build_id: str) -> Response:
     """Download the portfolio as a deployable static site, zipped.
 
         index.html
@@ -442,30 +496,36 @@ def export(build_id: str) -> FileResponse:
 
     files = render_bundle(
         graph, config,
-        analytics=record.get("analytics"),
-        repositories=record.get("repositories"),
-        gallery=gallery,
+        analytics = record.get("analytics"),
+        repositories = record.get("repositories"),
+        gallery = gallery,
     )
 
-    out_dir = settings.cache_path / "exports"
-    out_dir.mkdir(parents=True, exist_ok=True)
+    # Built in memory: an ephemeral host has nowhere durable to put a temp file,
+    # and the zip is disposable the moment it is streamed to the browser.
+    store = get_file_store()
     slug = (graph.person.name or "portfolio").lower().replace(" ", "-")
-    zip_path = out_dir / f"{slug}-{build_id}.zip"
+    buf = io.BytesIO()
 
-    gdir = _gallery_dir(build_id)
-    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+    with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
         for name, text in files.items():
             zf.writestr(name, text)
 
+        shipped = 0
         for item in gallery:
-            src = gdir / item["filename"]
-            if src.exists():
-                zf.write(src, f"images/{item['filename']}")
+            ref = item.get("ref") or str(_gallery_dir(build_id) / item["filename"])
+            data = store.read(ref)
+            if data is not None:
+                zf.writestr(f"images/{item['filename']}", data)
+                shipped += 1
 
-        zf.writestr("README.txt", _export_readme(graph, len(gallery)))
+        zf.writestr("README.txt", _export_readme(graph, shipped))
 
-    return FileResponse(zip_path, media_type="application/zip", filename=zip_path.name)
-
+    return Response(
+        content=buf.getvalue(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{slug}-{build_id}.zip"'},
+    )
 
 def _export_readme(graph: ProfileGraph, image_count: int) -> str:
     return (
@@ -484,7 +544,6 @@ def _export_readme(graph: ProfileGraph, image_count: int) -> str:
         "console to highlight them.\n"
     )
 
-
 @router.get("/profiles")
 def list_profiles(limit: int = 20) -> dict[str, Any]:
     """Recent builds, newest first."""
@@ -493,9 +552,9 @@ def list_profiles(limit: int = 20) -> dict[str, Any]:
         "profiles": get_repository().list_recent(max(1, min(limit, 50))),
     }
 
-
 @router.delete("/profile/{build_id}")
-def delete_profile(build_id: str) -> dict[str, bool]:
+def delete_profile(build_id: str) -> dict[str, Any]:
+    """Remove a build: its record, and every file belonging to it."""
+    removed = get_file_store().delete_build(build_id)
     get_repository().delete(build_id)
-    shutil.rmtree(settings.upload_path / build_id, ignore_errors=True)
-    return {"ok": True}
+    return {"ok": True, "files_removed": removed}

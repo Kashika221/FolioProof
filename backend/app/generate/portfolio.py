@@ -21,8 +21,7 @@ from app.models.claims import ClaimKind, EnhancedBlock, ProfileGraph
 LANG_COLOURS = ["#3572A5", "#f1e05a", "#e34c26", "#563d7c", "#b07219",
                 "#00ADD8", "#dea584", "#4F5D95"]
 
-env = Environment(autoescape=select_autoescape(["html"]))
-
+env = Environment(autoescape = select_autoescape(["html"]))
 
 def _provenance_payload(block: EnhancedBlock) -> list[dict[str, Any]]:
     out = []
@@ -43,7 +42,6 @@ def _provenance_payload(block: EnhancedBlock) -> list[dict[str, Any]]:
         })
     return out
 
-
 def render_block(block: EnhancedBlock | None) -> str:
     """Render published sentences as provenance-tagged spans."""
     if block is None:
@@ -56,13 +54,12 @@ def render_block(block: EnhancedBlock | None) -> str:
                 {"source": e.source_id, "text": e.short(220), "locator": e.locator.model_dump()}
                 for e in s.evidence[:4]
             ],
-        }), quote=True)
+        }), quote = True)
         parts.append(
             f'<span data-provenance="{payload}" data-source="{s.primary_source or ""}">'
             f"{html.escape(s.text)}</span>"
         )
     return " ".join(parts)
-
 
 PORTFOLIO_JS = r"""// Mobile nav toggle + active-section highlighting.
 (function () {
@@ -134,7 +131,6 @@ PORTFOLIO_JS = r"""// Mobile nav toggle + active-section highlighting.
   });
 })();
 """
-
 
 TEMPLATE = env.from_string("""<!doctype html>
 <html lang="en">
@@ -455,10 +451,8 @@ TEMPLATE = env.from_string("""<!doctype html>
 </html>
 """)
 
-
 def _block_for(graph: ProfileGraph, target: str) -> EnhancedBlock | None:
     return next((b for b in graph.blocks if b.target == target), None)
-
 
 def build_view_model(graph: ProfileGraph, analytics: dict | None = None,
                      resume_url: str | None = None,
@@ -578,7 +572,6 @@ def build_view_model(graph: ProfileGraph, analytics: dict | None = None,
         ),
     }
 
-
 def render_portfolio(
     graph: ProfileGraph,
     config: ThemeConfig | None = None,
@@ -596,7 +589,6 @@ def render_portfolio(
     view["css"] = build_css(config)
     view["external_assets"] = False
     return TEMPLATE.render(**view)
-
 
 def render_bundle(
     graph: ProfileGraph,

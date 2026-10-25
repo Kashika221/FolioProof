@@ -216,8 +216,8 @@ export default function Home() {
               />
             </div>
             <p className="mt-1.5 text-[12.5px] text-fg-subtle">
-              Repositories are matched against your résumé projects so both
-              sources back the same claim.
+              Your top repositories get their own section, and their languages
+              enrich your skills list.
             </p>
           </div>
 

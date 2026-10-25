@@ -1,10 +1,13 @@
 """The end-to-end pipeline.
 
-    parse sources -> ONE llm call -> bind spans -> fuse skills -> render
+    parse sources -> LLM extract (1-3 calls) -> bind spans -> fuse skills -> render
 
-Exactly one LLM call is made per build, in `extract_portfolio`. Everything
-after it is deterministic: span attachment, skill canonicalisation, conflict
-detection and rendering all run without the model.
+Almost every build finishes in ONE LLM call. `_extract_with_fallbacks` adds two
+safety-net retries so unusually dense résumés still produce a portfolio instead
+of a hard failure: on truncation it retries once with a tighter prompt, then as
+a last resort accepts the truncated JSON as best-effort with a warning banner.
+Everything after extraction is deterministic: span attachment, skill
+canonicalisation, conflict detection and rendering all run without the model.
 
 Experience, education and projects come from the résumé only. GitHub is used
 for the skills union and for its own Top Repositories section; its repositories
@@ -25,9 +28,10 @@ from app.enhance.extract_all import (
     content_to_claims,
     extract_portfolio,
 )
-from app.enhance.llm import GroqLLM, LLMUnavailable, get_llm
+from app.enhance.llm import GroqLLM, LLMUnavailable, TruncatedResponse, get_llm
 from app.enhance.text import split_sentences
 from app.fusion.resolve import detect_conflicts, fuse_skills
+from app.fusion.skills import canonical_skill
 from app.ingest.github import GitHubClient, GitHubError
 from app.ingest.pdf_extract import ParsedPDF, parse_pdf
 from app.models.claims import (
@@ -47,7 +51,6 @@ from app.models.claims import (
 
 log = logging.getLogger(__name__)
 
-
 @dataclass
 class BuildInputs:
     resume_path: str | Path | None = None
@@ -56,36 +59,42 @@ class BuildInputs:
     github_username: str | None = None
     max_repos: int = 10
 
-
 @dataclass
 class BuildResult:
     graph: ProfileGraph
     analytics: dict[str, Any] | None = None
-    repositories: list[dict[str, Any]] = field(default_factory=list)
-    gallery: list[dict[str, Any]] = field(default_factory=list)
+    repositories: list[dict[str, Any]] = field(default_factory = list)
+    gallery: list[dict[str, Any]] = field(default_factory = list)
     content: PortfolioContent | None = None
-    metrics: dict[str, Any] = field(default_factory=dict)
-    warnings: list[str] = field(default_factory=list)
-
+    metrics: dict[str, Any] = field(default_factory = dict)
+    warnings: list[str] = field(default_factory = list)
 
 def _github_skill_evidence(payload: dict[str, Any]) -> dict[str, Evidence]:
-    """Evidence for skills that only GitHub can attest to (repo languages).
+    """Evidence for skills that GitHub can attest to (repo languages).
 
-    Without this a language present in the repos but absent from the résumé
-    would be dropped, because no PDF line could be found to anchor it.
+    Keyed by BOTH the raw language name ("javascript") AND its canonical form
+    ("javascript" again here, but e.g. "typescript" for a "ts" alias) so an
+    LLM-emitted skill like "JS" still matches a GitHub "JavaScript" for
+    multi-source corroboration.
+
+    Also feeds ``_claim(fallback=…)`` so a language present in the repos but
+    absent from the résumé is not dropped for lack of a PDF anchor.
     """
     out: dict[str, Evidence] = {}
     login = (payload.get("user") or {}).get("login", "")
     for repo in payload.get("repos") or []:
         for lang in (repo.get("_languages") or {}):
-            out.setdefault(lang.strip().lower(), Evidence(
+            ev = Evidence(
                 source_id="github",
                 locator=GitHubField(repo=repo.get("full_name"), field="language",
                                     url=repo.get("html_url")),
                 raw_text=f"{lang} used in {login}/{repo['name']}",
-            ))
+            )
+            out.setdefault(lang.strip().lower(), ev)
+            canon = canonical_skill(lang)
+            if canon:
+                out.setdefault(canon.lower(), ev)
     return out
-
 
 def build_profile(
     inputs: BuildInputs,
@@ -116,11 +125,11 @@ def build_profile(
         docs[source_id] = parsed          # type: ignore[index]
         texts[source_id] = parsed.full_text
         documents.append(SourceDocument(
-            source_id=source_id,          # type: ignore[arg-type]
-            filename=Path(path).name,
-            stored_path=str(path),
-            page_count=parsed.page_count,
-            page_sizes=parsed.page_sizes,
+            source_id = source_id,          # type: ignore[arg-type]
+            filename = Path(path).name,
+            stored_path = str(path),
+            page_count = parsed.page_count,
+            page_sizes = parsed.page_sizes,
         ))
 
     # -- 2. fetch GitHub (no LLM) ------------------------------------------
@@ -131,31 +140,31 @@ def build_profile(
         try:
             gh = GitHubClient()
             github_payload = gh.fetch_profile(
-                inputs.github_username, max_repos=inputs.max_repos
+                inputs.github_username, max_repos = inputs.max_repos
             )
             analytics = gh.analytics(github_payload)
             repositories = gh.top_repositories(github_payload, limit=5)
         except GitHubError as exc:
             warnings.append(f"GitHub ingestion failed: {exc}")
 
-    # -- 3. THE single LLM call --------------------------------------------
-    bundle = build_source_bundle(
-        resume_text=texts["resume"],
-        linkedin_text=texts["linkedin"],
-        cover_letter_text=texts["cover_letter"],
-        github=github_payload,
-    )
-
+    # -- 3. LLM extraction with a 3-step fallback ladder -------------------
+    #
+    # Normally exactly one call. Truncation on unusually dense résumés falls
+    # through to a tighter retry, then to accept-truncated-as-best-effort so a
+    # user gets a mostly-complete portfolio instead of a hard failure.
     content: PortfolioContent | None = None
     llm_calls = 0
-    if bundle.strip() and llm.available:
-        try:
-            content = extract_portfolio(bundle, llm=llm)
-            llm_calls = 1
-        except LLMUnavailable as exc:
-            warnings.append(f"LLM extraction unavailable: {exc}")
-    elif not llm.available:
+    if not llm.available:
         warnings.append("GROQ_API_KEY not configured — no content could be generated")
+    else:
+        content, llm_calls, extract_warnings = _extract_with_fallbacks(
+            resume_text = texts["resume"],
+            linkedin_text = texts["linkedin"],
+            cover_letter_text = texts["cover_letter"],
+            github = github_payload,
+            llm = llm,
+        )
+        warnings.extend(extract_warnings)
 
     if content is None:
         content = PortfolioContent()
@@ -163,7 +172,7 @@ def build_profile(
     # -- 4. bind values back to their source spans (no LLM) ----------------
     person, claims = content_to_claims(
         content, docs,
-        github_skill_evidence=_github_skill_evidence(github_payload or {}),
+        github_skill_evidence = _github_skill_evidence(github_payload or {}),
     )
 
     if github_payload and not person.links.get("github"):
@@ -174,9 +183,9 @@ def build_profile(
     others = [c for c in claims if c.kind is not ClaimKind.SKILL]
 
     graph = ProfileGraph(
-        person=person,
-        claims=[*skills, *others],
-        documents=documents,
+        person = person,
+        claims = [*skills, *others],
+        documents = documents,
     )
 
     # Conflicts come from two places: whatever can still be spotted structurally
@@ -204,12 +213,12 @@ def build_profile(
     elapsed = time.perf_counter() - started
 
     return BuildResult(
-        graph=graph,
-        analytics=analytics,
-        repositories=repositories,
-        gallery=[],
-        content=content,
-        metrics={
+        graph = graph,
+        analytics = analytics,
+        repositories = repositories,
+        gallery = [],
+        content = content,
+        metrics = {
             **graph.stats(),
             "llm_calls": llm_calls,
             "llm_available": llm.available,
@@ -219,9 +228,81 @@ def build_profile(
             "hero_tagline": content.hero_tagline,
             "elapsed_seconds": round(elapsed, 2),
         },
-        warnings=warnings,
+        warnings = warnings,
     )
 
+def _extract_with_fallbacks(
+    *,
+    resume_text: str,
+    linkedin_text: str,
+    cover_letter_text: str,
+    github: dict[str, Any] | None,
+    llm: GroqLLM,
+) -> tuple[PortfolioContent | None, int, list[str]]:
+    """Try full → tight → accept-truncated. Returns (content, call_count, warnings)."""
+    warnings: list[str] = []
+
+    def _bundle(tight: bool) -> str:
+        return build_source_bundle(
+            resume_text = resume_text,
+            linkedin_text = linkedin_text,
+            cover_letter_text = cover_letter_text,
+            github = github,
+            tight = tight,
+        )
+
+    if not _bundle(tight = False).strip():
+        return None, 0, warnings
+
+    # ---- attempt 1: normal bundle ---------------------------------------
+    try:
+        return extract_portfolio(_bundle(tight = False), llm = llm), 1, warnings
+    except TruncatedResponse as exc:
+        log.warning("extraction truncated on first attempt: %s", exc)
+    except LLMUnavailable as exc:
+        # Rate limit, auth, or an already-classified transient failure.
+        # No point retrying — the tight retry hits the same API.
+        return None, 1, [f"LLM extraction unavailable: {exc}"]
+    except Exception as exc:                                             # pragma: no cover
+        log.exception("unexpected LLM error on first attempt")
+        return None, 1, [f"LLM extraction failed: {type(exc).__name__}: {str(exc)[:180]}"]
+
+    # ---- attempt 2: tight bundle ----------------------------------------
+    # Groq TPM is per-minute; a small pause reduces the chance the retry
+    # itself gets throttled when it comes right on top of the first call.
+    time.sleep(1.5)
+    try:
+        content = extract_portfolio(_bundle(tight = True), llm = llm)
+        warnings.append(
+            "Extraction truncated on first attempt; retried successfully with "
+            "reduced LinkedIn/cover-letter/GitHub context."
+        )
+        return content, 2, warnings
+    except TruncatedResponse as exc:
+        log.warning("extraction truncated on tight retry: %s", exc)
+    except LLMUnavailable as exc:
+        return None, 2, [f"LLM extraction unavailable: {exc}"]
+    except Exception as exc:                                             # pragma: no cover
+        log.exception("unexpected LLM error on tight retry")
+        return None, 2, [f"LLM extraction failed: {type(exc).__name__}: {str(exc)[:180]}"]
+
+    # ---- attempt 3: accept truncated as best-effort ---------------------
+    time.sleep(1.5)
+    try:
+        content = extract_portfolio(
+            _bundle(tight = True), llm = llm, allow_truncated = True,
+        )
+        warnings.append(
+            "Your résumé is unusually dense — the model's response was truncated "
+            "and some entries may be incomplete. A shorter résumé (or a paid "
+            "Groq tier with a higher token limit) will produce a fuller extraction."
+        )
+        return content, 3, warnings
+    except (TruncatedResponse, LLMUnavailable) as exc:
+        return None, 3, [f"LLM extraction unavailable after retries: {exc}"]
+    except Exception as exc:                                             # pragma: no cover
+        log.exception("unexpected LLM error on best-effort attempt")
+        return None, 3, [f"LLM extraction failed: {type(exc).__name__}: {str(exc)[:180]}"]
 
 def _discrepancy_conflicts(
     content: PortfolioContent,
@@ -249,22 +330,21 @@ def _discrepancy_conflicts(
             continue
 
         options = [
-            ConflictOption(value=f"{d.resume_value} (from resume)", evidence=resume_ev),
+            ConflictOption(value = f"{d.resume_value} (from resume)", evidence = resume_ev),
             ConflictOption(
-                value=f"{d.other_value} (from {d.other_source})", evidence=other_ev
+                value = f"{d.other_value} (from {d.other_source})", evidence = other_ev
             ),
         ]
         out.append(Conflict(
-            field=d.field or "unknown",
-            description=(
+            field = d.field or "unknown",
+            description = (
                 f"Your sources disagree about {d.field or 'a detail'}: the résumé "
                 f"says “{d.resume_value}”, {d.other_source} says “{d.other_value}”."
             ),
-            options=options,
-            resolved_value=options[0].value,     # résumé wins by precedence
+            options = options,
+            resolved_value = options[0].value,     # résumé wins by precedence
         ))
     return out
-
 
 def _block_from_text(
     target: str,
@@ -281,9 +361,9 @@ def _block_from_text(
     evidence = [e for c in claims for e in c.evidence][:12]
     claim_ids = [c.id for c in claims]
 
-    block = EnhancedBlock(target=target, original=text)
+    block = EnhancedBlock(target = target, original = text)
     block.sentences = [
-        GeneratedSentence(text=s, claim_ids=claim_ids, evidence=evidence)
+        GeneratedSentence(text = s, claim_ids = claim_ids, evidence = evidence)
         for s in split_sentences(text)
     ]
     return block

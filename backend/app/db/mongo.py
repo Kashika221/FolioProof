@@ -24,7 +24,6 @@ from app.config import settings
 
 log = logging.getLogger(__name__)
 
-
 class ProfileRepository:
     """Storage for build records, backed by MongoDB when one is available."""
 
@@ -35,7 +34,7 @@ class ProfileRepository:
         self.uri = uri or settings.mongodb_uri
         self.db_name = db_name or settings.mongodb_db
         self.fallback_dir = fallback_dir or (settings.cache_path / "profiles")
-        self.fallback_dir.mkdir(parents=True, exist_ok=True)
+        self.fallback_dir.mkdir(parents = True, exist_ok = True)
 
         self._client: MongoClient | None = None
         self._collection = None
@@ -48,12 +47,12 @@ class ProfileRepository:
         try:
             client: MongoClient = MongoClient(
                 self.uri,
-                serverSelectionTimeoutMS=settings.mongodb_timeout_ms,
-                appname="folioproof",
+                serverSelectionTimeoutMS = settings.mongodb_timeout_ms,
+                appname = "folioproof",
             )
             client.admin.command("ping")          # forces a real round-trip
             collection = client[self.db_name][self.COLLECTION]
-            collection.create_index([("build_id", ASCENDING)], unique=True)
+            collection.create_index([("build_id", ASCENDING)], unique = True)
             collection.create_index([("created_at", ASCENDING)])
 
             self._client = client
@@ -115,7 +114,7 @@ class ProfileRepository:
 
         path = self._file(build_id)
         if path.exists():
-            return json.loads(path.read_text(encoding="utf-8"))
+            return json.loads(path.read_text(encoding = "utf-8"))
         return None
 
     def update_fields(self, build_id: str, fields: dict[str, Any]) -> bool:
@@ -169,7 +168,7 @@ class ProfileRepository:
         out = []
         for f in files:
             try:
-                d = json.loads(f.read_text(encoding="utf-8"))
+                d = json.loads(f.read_text(encoding = "utf-8"))
                 out.append({
                     "build_id": d.get("build_id", f.stem),
                     "created_at": d.get("created_at"),
@@ -184,9 +183,7 @@ class ProfileRepository:
         if self._client is not None:
             self._client.close()
 
-
 _repo: ProfileRepository | None = None
-
 
 def get_repository() -> ProfileRepository:
     global _repo

@@ -38,31 +38,25 @@ GITHUB_AUTHORITATIVE_FIELDS = frozenset({
     "languages", "primary_language", "pushed_at", "readme",
 })
 
-
 def rank(source: str | None) -> int:
     return SOURCE_PRIORITY.get(source or "", DEFAULT_PRIORITY)
 
-
 def best_source(sources: Iterable[str]) -> str | None:
     """The most authoritative source in the set."""
-    ordered = sorted(sources, key=rank)
+    ordered = sorted(sources, key = rank)
     return ordered[0] if ordered else None
-
 
 def primary_evidence(evidence: Sequence[Evidence]) -> Evidence | None:
     """The evidence item from the most authoritative source."""
     if not evidence:
         return None
-    return min(evidence, key=lambda e: rank(e.source_id))
-
+    return min(evidence, key = lambda e: rank(e.source_id))
 
 def sort_evidence(evidence: Sequence[Evidence]) -> list[Evidence]:
     """Evidence ordered most-authoritative first (stable within a source)."""
-    return sorted(evidence, key=lambda e: rank(e.source_id))
-
+    return sorted(evidence, key = lambda e: rank(e.source_id))
 
 T = TypeVar("T")
-
 
 def prefer_attribute(
     key: str,
@@ -81,7 +75,6 @@ def prefer_attribute(
 
     winner = best_source(usable.keys())
     return usable[winner] if winner else None
-
 
 def merge_by_priority(claims: Sequence[Claim]) -> Claim:
     """Fold duplicate claims into one, letting the highest-priority source win.

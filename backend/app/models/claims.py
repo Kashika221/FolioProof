@@ -18,17 +18,14 @@ from typing import Annotated, Any, Literal, Union
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-
 def _new_id() -> str:
     return uuid.uuid4().hex[:12]
-
 
 # ---------------------------------------------------------------------------
 # Source locators -- where a piece of evidence physically lives
 # ---------------------------------------------------------------------------
 
 SourceId = Literal["resume", "github", "linkedin", "cover_letter"]
-
 
 class PDFSpan(BaseModel):
     """A rectangle on a page of an uploaded PDF.
@@ -39,7 +36,7 @@ class PDFSpan(BaseModel):
     """
 
     kind: Literal["pdf"] = "pdf"
-    page: int = Field(ge=0, description="0-indexed page number")
+    page: int = Field(ge = 0, description = "0-indexed page number")
     x0: float
     top: float
     x1: float
@@ -54,14 +51,13 @@ class PDFSpan(BaseModel):
         if other.page != self.page:
             return self
         return PDFSpan(
-            page=self.page,
-            x0=min(self.x0, other.x0),
-            top=min(self.top, other.top),
-            x1=max(self.x1, other.x1),
-            bottom=max(self.bottom, other.bottom),
-            line_index=self.line_index,
+            page = self.page,
+            x0 = min(self.x0, other.x0),
+            top = min(self.top, other.top),
+            x1 = max(self.x1, other.x1),
+            bottom = max(self.bottom, other.bottom),
+            line_index = self.line_index,
         )
-
 
 class GitHubField(BaseModel):
     """A specific field of a specific GitHub resource."""
@@ -71,40 +67,35 @@ class GitHubField(BaseModel):
     field: str                       # description | readme | language | topics | stars ...
     url: str | None = None
 
-
 class TextSpan(BaseModel):
     """A character range inside a plain-text or DOCX source."""
 
     kind: Literal["text"] = "text"
-    start: int = Field(ge=0)
-    end: int = Field(ge=0)
+    start: int = Field(ge = 0)
+    end: int = Field(ge = 0)
     section: str | None = None
-
 
 Locator = Annotated[
     Union[PDFSpan, GitHubField, TextSpan],
-    Field(discriminator="kind"),
+    Field(discriminator = "kind"),
 ]
-
 
 class Evidence(BaseModel):
     """One concrete justification for a claim."""
 
-    model_config = ConfigDict(frozen=True)
+    model_config = ConfigDict(frozen = True)
 
     source_id: SourceId
     locator: Locator
-    raw_text: str = Field(min_length=1)
+    raw_text: str = Field(min_length = 1)
 
     def short(self, limit: int = 160) -> str:
         t = " ".join(self.raw_text.split())
         return t if len(t) <= limit else t[: limit - 1] + "…"
 
-
 # ---------------------------------------------------------------------------
 # Claims
 # ---------------------------------------------------------------------------
-
 
 class ClaimKind(str, Enum):
     SKILL = "skill"
@@ -116,19 +107,18 @@ class ClaimKind(str, Enum):
     CONTACT = "contact"
     SUMMARY = "summary"
 
-
 class Claim(BaseModel):
     """An atomic professional fact, permanently bound to its evidence."""
 
-    id: str = Field(default_factory=_new_id)
+    id: str = Field(default_factory = _new_id)
     kind: ClaimKind
-    value: str = Field(min_length=1, description="Canonical short form, e.g. 'FastAPI'")
-    attributes: dict[str, Any] = Field(default_factory=dict)
+    value: str = Field(min_length = 1, description = "Canonical short form, e.g. 'FastAPI'")
+    attributes: dict[str, Any] = Field(default_factory = dict)
 
     # The invariant. Do not relax this.
     evidence: list[Evidence] = Field(min_length=1)
 
-    confidence: float = Field(default=1.0, ge=0.0, le=1.0)
+    confidence: float = Field(default = 1.0, ge = 0.0, le = 1.0)
 
     @field_validator("value")
     @classmethod
@@ -165,30 +155,26 @@ class Claim(BaseModel):
 
         return merge_by_priority([self, other])
 
-
 # ---------------------------------------------------------------------------
 # Conflicts
 # ---------------------------------------------------------------------------
-
 
 class ConflictOption(BaseModel):
     value: str
     evidence: Evidence
 
-
 class Conflict(BaseModel):
     """A disagreement between sources that the user must resolve."""
 
-    id: str = Field(default_factory=_new_id)
+    id: str = Field(default_factory = _new_id)
     field: str                       # "graduation_year", "job_title:Acme", ...
     description: str
-    options: list[ConflictOption] = Field(min_length=2)
+    options: list[ConflictOption] = Field(min_length = 2)
     resolved_value: str | None = None
 
     @property
     def is_resolved(self) -> bool:
         return self.resolved_value is not None
-
 
 class Gap(BaseModel):
     """Something present in one source but absent from another.
@@ -197,23 +183,21 @@ class Gap(BaseModel):
     GitHub repo that never made it onto the resume).
     """
 
-    id: str = Field(default_factory=_new_id)
+    id: str = Field(default_factory = _new_id)
     kind: str                        # "missing_from_resume", "missing_from_github"
     description: str
     claim_id: str | None = None
-
 
 # ---------------------------------------------------------------------------
 # Generated text + verification
 # ---------------------------------------------------------------------------
 
-
 class GeneratedSentence(BaseModel):
     """One sentence of portfolio copy, traceable back to the claims behind it."""
 
     text: str
-    claim_ids: list[str] = Field(default_factory=list)
-    evidence: list[Evidence] = Field(default_factory=list)
+    claim_ids: list[str] = Field(default_factory = list)
+    evidence: list[Evidence] = Field(default_factory = list)
     note: str | None = None
 
     @property
@@ -222,7 +206,6 @@ class GeneratedSentence(BaseModel):
         from app.fusion.priority import best_source
 
         return best_source(e.source_id for e in self.evidence)
-
 
 class EnhancedBlock(BaseModel):
     """A rewritten passage (project description, bio, ...) plus its audit trail."""
@@ -235,11 +218,9 @@ class EnhancedBlock(BaseModel):
     def published_text(self) -> str:
         return " ".join(s.text for s in self.sentences)
 
-
 # ---------------------------------------------------------------------------
 # The aggregate
 # ---------------------------------------------------------------------------
-
 
 class PersonInfo(BaseModel):
     name: str | None = None
@@ -248,7 +229,6 @@ class PersonInfo(BaseModel):
     phone: str | None = None
     location: str | None = None
     links: dict[str, str] = Field(default_factory=dict)
-
 
 class SourceDocument(BaseModel):
     """A file the user gave us, kept so the provenance viewer can render it."""
@@ -259,16 +239,15 @@ class SourceDocument(BaseModel):
     page_count: int = 0
     page_sizes: list[tuple[float, float]] = Field(default_factory=list)
 
-
 class ProfileGraph(BaseModel):
     """The fused, non-contradictory profile assembled from every source."""
 
-    person: PersonInfo = Field(default_factory=PersonInfo)
-    claims: list[Claim] = Field(default_factory=list)
-    conflicts: list[Conflict] = Field(default_factory=list)
-    gaps: list[Gap] = Field(default_factory=list)
-    documents: list[SourceDocument] = Field(default_factory=list)
-    blocks: list[EnhancedBlock] = Field(default_factory=list)
+    person: PersonInfo = Field(default_factory = PersonInfo)
+    claims: list[Claim] = Field(default_factory = list)
+    conflicts: list[Conflict] = Field(default_factory = list)
+    gaps: list[Gap] = Field(default_factory = list)
+    documents: list[SourceDocument] = Field(default_factory = list)
+    blocks: list[EnhancedBlock] = Field(default_factory = list)
 
     def by_kind(self, kind: ClaimKind) -> list[Claim]:
         return [c for c in self.claims if c.kind is kind]

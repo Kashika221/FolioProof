@@ -23,11 +23,9 @@ log = logging.getLogger(__name__)
 
 _YEAR_RE = re.compile(r"(19|20)\d{2}")
 
-
 # ---------------------------------------------------------------------------
 # Skills
 # ---------------------------------------------------------------------------
-
 
 def fuse_skills(claims: list[Claim]) -> list[Claim]:
     """Collapse skill claims onto canonical names, merging their evidence.
@@ -40,20 +38,18 @@ def fuse_skills(claims: list[Claim]) -> list[Claim]:
         canon = canonical_skill(c.value)
         if not canon:
             continue
-        normalised = c.model_copy(update={"value": canon})
+        normalised = c.model_copy(update = {"value": canon})
         if canon in merged:
             merged[canon] = merge_by_priority([merged[canon], normalised])
         else:
             merged[canon] = normalised
 
     # Skills confirmed by more than one source sort first.
-    return sorted(merged.values(), key=lambda c: (-c.corroboration, c.value.lower()))
-
+    return sorted(merged.values(), key = lambda c: (-c.corroboration, c.value.lower()))
 
 # ---------------------------------------------------------------------------
 # Conflict detection
 # ---------------------------------------------------------------------------
-
 
 def _auto_resolve(conflict: Conflict) -> Conflict:
     """Pick the winning option using source precedence.
@@ -61,10 +57,9 @@ def _auto_resolve(conflict: Conflict) -> Conflict:
     resume > linkedin > github > cover_letter. The user can still override the
     choice in the UI; this just means they never *have* to.
     """
-    winner = min(conflict.options, key=lambda o: rank(o.evidence.source_id))
+    winner = min(conflict.options, key = lambda o: rank(o.evidence.source_id))
     conflict.resolved_value = winner.value
     return conflict
-
 
 def detect_conflicts(claims: list[Claim]) -> list[Conflict]:
     """Find places where two sources disagree about the same underlying fact.
@@ -92,20 +87,20 @@ def detect_conflicts(claims: list[Claim]) -> list[Conflict]:
         options = sorted(
             (
                 ConflictOption(
-                    value=f"{year} (from {src})",
-                    evidence=next(
+                    value = f"{year} (from {src})",
+                    evidence = next(
                         (e for e in claim.evidence if e.source_id == src),
                         claim.evidence[0],
                     ),
                 )
                 for src, (year, claim) in year_by_source.items()
             ),
-            key=lambda o: rank(o.evidence.source_id),
+            key = lambda o: rank(o.evidence.source_id),
         )
         conflicts.append(_auto_resolve(Conflict(
-            field="graduation_year",
-            description="Your sources give different graduation years.",
-            options=options,
+            field = "graduation_year",
+            description = "Your sources give different graduation years.",
+            options = options,
         )))
 
     # --- job titles for the same organisation -----------------------------
@@ -128,15 +123,15 @@ def detect_conflicts(claims: list[Claim]) -> list[Conflict]:
                     ConflictOption(value=f"{title} (from {src})", evidence=ev)  # type: ignore[arg-type]
                     for _, (title, ev, src) in titles.items()
                 ),
-                key=lambda o: rank(o.evidence.source_id),
+                key = lambda o: rank(o.evidence.source_id),
             )
             conflicts.append(_auto_resolve(Conflict(
-                field=f"job_title:{org}",
-                description=(
+                field = f"job_title:{org}",
+                description = (
                     "Different job titles listed for "
                     f"{group[0].attributes.get('organisation')}."
                 ),
-                options=options,
+                options = options,
             )))
 
     return conflicts

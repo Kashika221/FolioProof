@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from typing import Any, TypeVar
 
 from groq import Groq, GroqError
@@ -24,9 +25,29 @@ log = logging.getLogger(__name__)
 
 T = TypeVar("T", bound=BaseModel)
 
+# Transient failures worth retrying: connection blips and 5xx from Groq's edge.
+_TRANSIENT_MARKERS = (
+    "connection", "timeout", "timed out", "temporarily unavailable",
+    "internal server error", "bad gateway", "service unavailable",
+    "gateway timeout", "500", "502", "503", "504",
+)
+
+def _is_transient(exc: Exception) -> bool:
+    text = str(exc).lower()
+    return any(m in text for m in _TRANSIENT_MARKERS)
 
 class LLMUnavailable(RuntimeError):
     """Raised when no API key is configured or Groq cannot be reached."""
+
+class TruncatedResponse(LLMUnavailable):
+    """The model ran out of output budget mid-answer.
+
+    Worth its own type because it is the silent one. gpt-oss closes the JSON
+    when it is cut off, so a truncated reply still *parses* -- Pydantic
+    validates a half-populated object and the missing experience, projects and
+    achievements simply never appear. Nothing errors. Always check
+    `finish_reason` rather than trusting a successful parse.
+    """
 
 
 class RateLimited(LLMUnavailable):
@@ -42,10 +63,8 @@ class RateLimited(LLMUnavailable):
         self.model = model
         self.retry_after = retry_after
 
-
 _RETRY_RE = re.compile(r"try again in ([\dhms.]+)", re.I)
 _LIMIT_RE = re.compile(r"on (tokens per day|tokens per minute|requests per \w+)", re.I)
-
 
 def _classify(exc: Exception, model: str) -> LLMUnavailable:
     """Turn Groq's raw error blob into something a human can act on."""
@@ -61,7 +80,6 @@ def _classify(exc: Exception, model: str) -> LLMUnavailable:
     if retry:
         msg += f" — resets in {retry.group(1)}"
     return RateLimited(msg, model=model, retry_after=retry.group(1) if retry else None)
-
 
 class GroqLLM:
     def __init__(self, api_key: str | None = None, model: str | None = None):
@@ -86,6 +104,29 @@ class GroqLLM:
 
     # -- raw text ----------------------------------------------------------
 
+    def _create_with_retry(self, **kwargs: Any) -> Any:
+        """Call chat.completions.create with backoff on transient failures.
+
+        Groq's edge occasionally 5xx's or drops the connection mid-request. A
+        short retry saves the build from a stack trace on the user's screen.
+        Rate-limit and auth errors are NOT retried — those are terminal.
+        """
+        model = kwargs.get("model") or self.model
+        last_exc: Exception | None = None
+        for attempt in range(3):
+            try:
+                return self.client.chat.completions.create(**kwargs)
+            except GroqError as exc:
+                last_exc = exc
+                if not _is_transient(exc) or attempt == 2:
+                    raise _classify(exc, model) from exc
+                delay = 1.0 * (2 ** attempt)
+                log.warning("Groq transient error (attempt %d/3): %s — retrying in %.1fs",
+                            attempt + 1, str(exc)[:120], delay)
+                time.sleep(delay)
+        # Unreachable, but keeps the type checker happy.
+        raise _classify(last_exc or GroqError("unknown"), model)
+
     def complete(
         self,
         system: str,
@@ -95,18 +136,15 @@ class GroqLLM:
         temperature: float = 0.2,
         max_tokens: int = 2048,
     ) -> str:
-        try:
-            resp = self.client.chat.completions.create(
-                model=model or self.model,
-                messages=[
-                    {"role": "system", "content": system},
-                    {"role": "user", "content": user},
-                ],
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-        except GroqError as exc:  # network, auth, quota
-            raise _classify(exc, model or self.model) from exc
+        resp = self._create_with_retry(
+            model = model or self.model,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
+            temperature = temperature,
+            max_tokens = max_tokens,
+        )
         return (resp.choices[0].message.content or "").strip()
 
     # -- structured --------------------------------------------------------
@@ -121,11 +159,20 @@ class GroqLLM:
         temperature: float = 0.1,
         max_tokens: int = 4096,
         retries: int = 1,
+        allow_truncated: bool = False,
     ) -> T:
-        """Ask for JSON matching `schema` and return a validated instance."""
+        """Ask for JSON matching `schema` and return a validated instance.
+
+        By default a truncated reply (``finish_reason == 'length'``) raises
+        ``TruncatedResponse`` even if the JSON happens to parse — gpt-oss
+        closes braces when cut off, so a successful parse is not proof of
+        completeness. Callers on the last rung of a retry ladder can pass
+        ``allow_truncated=True`` to accept the partial answer instead of
+        failing the whole build.
+        """
         # Compact separators: the schema is sent on every request and
         # pretty-printing it costs ~27% more tokens for zero benefit.
-        shape = json.dumps(schema.model_json_schema(), separators=(",", ":"))
+        shape = json.dumps(schema.model_json_schema(), separators = (",", ":"))
         sys_prompt = (
             f"{system}\n\n"
             "Reply with a single JSON object and nothing else. It must validate "
@@ -133,33 +180,53 @@ class GroqLLM:
         )
 
         messages: list[dict[str, str]] = [
-            {"role": "system", "content": sys_prompt},
-            {"role": "user", "content": user},
+            {"role" : "system", "content" : sys_prompt},
+            {"role" : "user", "content" : user},
         ]
 
         last_error = ""
         for attempt in range(retries + 1):
-            try:
-                resp = self.client.chat.completions.create(
-                    model=model or self.model,
-                    messages=messages,  # type: ignore[arg-type]
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                    response_format={"type": "json_object"},
-                )
-            except GroqError as exc:
-                raise _classify(exc, model or self.model) from exc
+            resp = self._create_with_retry(
+                model = model or self.model,
+                messages = messages,
+                temperature = temperature,
+                max_tokens = max_tokens,
+                response_format = {"type": "json_object"},
+            )
 
-            raw = (resp.choices[0].message.content or "").strip()
+            choice = resp.choices[0]
+            was_truncated = choice.finish_reason == "length"
+            raw = (choice.message.content or "").strip()
+
+            if was_truncated and not allow_truncated:
+                used = getattr(resp, "usage", None)
+                raise TruncatedResponse(
+                    f"model hit the {max_tokens}-token output cap "
+                    f"(completion_tokens={getattr(used, 'completion_tokens', '?')}). "
+                    "The reply is incomplete even though it may parse."
+                )
+
             try:
-                return schema.model_validate_json(raw)
+                result = schema.model_validate_json(raw)
+                if was_truncated:
+                    log.warning(
+                        "accepting truncated response as best-effort "
+                        "(completion_tokens hit %d cap)", max_tokens,
+                    )
+                return result
             except ValidationError as exc:
                 last_error = str(exc)
+                if was_truncated:
+                    # Truncated AND unparseable — nothing to salvage.
+                    raise TruncatedResponse(
+                        f"model was cut off at {max_tokens} tokens and the "
+                        f"partial JSON did not validate: {last_error[:200]}"
+                    ) from exc
                 log.warning("LLM JSON failed validation (attempt %d): %s", attempt + 1, last_error[:300])
-                messages.append({"role": "assistant", "content": raw})
+                messages.append({"role" : "assistant", "content" : raw})
                 messages.append({
-                    "role": "user",
-                    "content": (
+                    "role" : "user",
+                    "content" : (
                         "That JSON failed schema validation with these errors:\n"
                         f"{last_error}\n\nReturn corrected JSON only."
                     ),
@@ -167,9 +234,7 @@ class GroqLLM:
 
         raise LLMUnavailable(f"Groq returned unparseable JSON after {retries + 1} attempts: {last_error[:300]}")
 
-
 _default: GroqLLM | None = None
-
 
 def get_llm() -> GroqLLM:
     global _default

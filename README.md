@@ -85,10 +85,27 @@ reputation:
 Quotas are **per model**, so switching also moved the build onto a fresh daily
 budget.
 
-Requests were cut from ~9,150 to ~6,200 tokens at the same time: `max_tokens`
-was reserving 6,000 for an output that is really ~2,000, and the JSON schema was
-being pretty-printed on every call for no benefit. Both count against the
-per-minute limit.
+### Sizing the request
+
+Groq counts prompt **and** completion against one per-minute limit — 8,000
+tokens on the free tier for this model. Both halves have to fit, so
+`output_budget()` derives the cap instead of hardcoding one:
+
+```
+max_tokens = TPM_limit − estimated_prompt_tokens − margin
+```
+
+A dense one-page CV needs ~3,300 completion tokens and a normal prompt leaves
+~4,950, so there is real headroom; a longer résumé loses headroom gracefully
+rather than blowing the limit.
+
+A fixed cap was tried and it failed in the worst possible way. At 3,500 the
+model ran out mid-answer, and **gpt-oss closes the JSON when it is cut off** —
+so the reply still validated against the schema. Pydantic accepted a
+half-populated object: experience truncated, two projects and both achievements
+simply absent, no error anywhere. `complete_json()` now rejects any response
+whose `finish_reason` is `length`, because a successful parse is not evidence of
+a complete answer.
 
 ## One LLM call per build
 
@@ -277,6 +294,73 @@ JSON files under `backend/data/cache/profiles/` so the app still runs.
 `GET /health` reports which backend is live (`mongodb` or `json-files`).
 
 Indexes created on connect: unique `build_id`, plus `created_at` for listing.
+
+### Where files live
+
+Mongo holds the **metadata**: the ProfileGraph, claims, metrics, theme, gallery
+entries. The bytes — uploaded PDFs and gallery images — live in **GridFS in the
+same cluster**, addressed by a reference stored on each record:
+
+```
+gridfs:<objectid>     in GridFS               (production)
+file:<path>           on local disk           (no database reachable)
+<bare path>           legacy, pre-GridFS      (still readable)
+```
+
+This is not premature engineering. Render, Railway, Fly (without a volume) and
+Cloud Run all have **ephemeral filesystems**: every redeploy, restart or idle
+spin-down wipes local files. Mongo records survive, so a disk-backed store fails
+*silently and late* — the app deploys fine, then 404s the résumé download, the
+provenance overlay and every gallery image after the first restart.
+
+GridFS chunks its payloads, so the 16 MB BSON document limit does not apply.
+At ~620 KB per build, Atlas's free 512 MB tier holds roughly **800 builds**.
+
+`backend/data/` is now only a dev convenience and a cache:
+
+```
+data/uploads/    fallback when no database is reachable
+data/cache/      GitHub API responses — disposable, rebuilds on demand
+```
+
+Both can be deleted at any time when Mongo is connected. There is a test that
+proves it: it writes a file, deletes the local directory, and asserts the file
+still reads back.
+
+---
+
+## Deploying
+
+**Backend** (Render, Railway, Fly — any Python host):
+
+```
+Build:  pip install -r backend/requirements.txt
+Start:  uvicorn app.main:app --host 0.0.0.0 --port $PORT --app-dir backend
+```
+
+Environment variables:
+
+| Variable | Value |
+|---|---|
+| `GROQ_API_KEY` | from console.groq.com |
+| `MONGODB_URI` | your Atlas `mongodb+srv://` string |
+| `MONGODB_DB` | `folioproof` |
+| `CORS_ORIGINS` | your deployed frontend, e.g. `https://folioproof.vercel.app` |
+| `GITHUB_TOKEN` | optional; raises 60 req/hr to 5,000 |
+
+`CORS_ORIGINS` matters: the deployed frontend is on a different host to the API,
+and the default localhost-only value blocks every browser request in production.
+
+**Frontend** (Vercel): set `NEXT_PUBLIC_API_BASE` to the deployed backend URL.
+
+**Check it worked** — `GET /health` reports both stores:
+
+```json
+{"storage": "mongodb", "file_storage": "gridfs"}
+```
+
+If either says `json-files` or `local-disk`, the database is not reachable and
+your data will not survive a restart. Fix that before you demo.
 
 
 ---

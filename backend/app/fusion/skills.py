@@ -62,7 +62,6 @@ for canonical, aliases in SKILL_ALIASES.items():
 
 _CLEAN_RE = re.compile(r"^[\s\-•*]+|[\s.,;:]+$")
 
-
 def canonical_skill(raw: str) -> str | None:
     """Map a raw skill string to its canonical name, or None if it is junk."""
     if not raw:
@@ -84,7 +83,6 @@ def canonical_skill(raw: str) -> str | None:
     # obviously lowercase words so "docker compose" doesn't sit next to "Docker".
     return s if any(c.isupper() for c in s) else s.title()
 
-
 CATEGORIES: dict[str, tuple[str, ...]] = {
     "Languages": ("Python", "JavaScript", "TypeScript", "C++", "C#", "Java", "Go",
                   "Rust", "SQL", "C", "R", "Kotlin", "Swift", "PHP", "Ruby", "Dart"),
@@ -103,10 +101,8 @@ CATEGORIES: dict[str, tuple[str, ...]] = {
 
 _CATEGORY_OF = {skill: cat for cat, skills in CATEGORIES.items() for skill in skills}
 
-
 def categorise(skill: str) -> str:
     return _CATEGORY_OF.get(skill, "Other")
-
 
 def group_skills(skills: list[str]) -> dict[str, list[str]]:
     """Bucket canonical skills into display categories, preserving order."""

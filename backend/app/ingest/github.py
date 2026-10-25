@@ -19,7 +19,6 @@ from typing import Any
 
 import httpx
 
-
 from app.config import settings
 from app.models.claims import Claim, ClaimKind, Evidence, GitHubField
 
@@ -32,16 +31,14 @@ README_CHAR_LIMIT = 6000
 BORING_NAMES = {"config", "dotfiles", "test", "demo", "hello-world", "practice",
                 "assignments", "leetcode", "hackerrank", "playground"}
 
-
 class GitHubError(RuntimeError):
     pass
-
 
 class GitHubClient:
     def __init__(self, token: str | None = None, cache_dir: Path | None = None):
         self.token = (token if token is not None else settings.github_token).strip()
         self.cache_dir = cache_dir or settings.cache_path / "github"
-        self.cache_dir.mkdir(parents=True, exist_ok=True)
+        self.cache_dir.mkdir(parents = True, exist_ok = True)
         self.rate_limit_remaining: int | None = None
 
     # -- plumbing ----------------------------------------------------------
@@ -64,9 +61,9 @@ class GitHubClient:
         if cache_key:
             cf = self._cache_file(cache_key)
             if cf.exists():
-                return json.loads(cf.read_text(encoding="utf-8"))
+                return json.loads(cf.read_text(encoding = "utf-8"))
 
-        resp = client.get(f"{API}{path}", headers=self._headers, timeout=20.0)
+        resp = client.get(f"{API}{path}", headers = self._headers, timeout = 20.0)
         self.rate_limit_remaining = int(resp.headers.get("x-ratelimit-remaining", -1))
 
         if resp.status_code == 404:
@@ -82,7 +79,7 @@ class GitHubClient:
         data = resp.json()
         if cache_key:
             self._cache_file(cache_key).write_text(
-                json.dumps(data, ensure_ascii=False), encoding="utf-8"
+                json.dumps(data, ensure_ascii = False), encoding = "utf-8"
             )
         return data
 
@@ -111,14 +108,14 @@ class GitHubClient:
                 page += 1
 
             own = [r for r in repos if not r.get("fork")]
-            ranked = sorted(own, key=self._repo_score, reverse=True)[:max_repos]
+            ranked = sorted(own, key = self._repo_score, reverse = True)[:max_repos]
 
             for repo in ranked:
                 full = repo["full_name"]
                 cache_key = f"{full}@{repo.get('pushed_at')}"
                 try:
                     repo["_languages"] = self._get(
-                        client, f"/repos/{full}/languages", cache_key=f"lang:{cache_key}"
+                        client, f"/repos/{full}/languages", cache_key = f"lang:{cache_key}"
                     )
                 except GitHubError:
                     repo["_languages"] = {}
@@ -127,7 +124,7 @@ class GitHubClient:
                         client, f"/repos/{full}/readme", cache_key=f"readme:{cache_key}"
                     )
                     content = base64.b64decode(readme.get("content", "")).decode(
-                        "utf-8", errors="replace"
+                        "utf-8", errors = "replace"
                     )
                     repo["_readme"] = content[:README_CHAR_LIMIT]
                 except (GitHubError, ValueError):
@@ -168,25 +165,25 @@ class GitHubClient:
 
         def ev(field: str, text: str, repo: str | None = None, url: str | None = None) -> Evidence:
             return Evidence(
-                source_id="github",
-                locator=GitHubField(repo=repo, field=field, url=url),
-                raw_text=text,
+                source_id = "github",
+                locator = GitHubField(repo = repo, field = field, url = url),
+                raw_text = text,
             )
 
         if user.get("bio"):
             claims.append(Claim(
-                kind=ClaimKind.SUMMARY,
-                value=user["bio"].strip(),
-                evidence=[ev("bio", user["bio"].strip(), url=user.get("html_url"))],
-                attributes={"origin": "github_bio"},
+                kind = ClaimKind.SUMMARY,
+                value = user["bio"].strip(),
+                evidence = [ev("bio", user["bio"].strip(), url = user.get("html_url"))],
+                attributes = {"origin": "github_bio"},
             ))
 
         if user.get("blog"):
             claims.append(Claim(
-                kind=ClaimKind.CONTACT,
-                value=user["blog"],
-                attributes={"type": "website"},
-                evidence=[ev("blog", user["blog"], url=user.get("html_url"))],
+                kind = ClaimKind.CONTACT,
+                value = user["blog"],
+                attributes = {"type": "website"},
+                evidence = [ev("blog", user["blog"], url = user.get("html_url"))],
             ))
 
         language_totals: dict[str, int] = {}
@@ -201,20 +198,20 @@ class GitHubClient:
             # both are what the rewriter is later allowed to draw from.
             evidence = []
             if desc:
-                evidence.append(ev("description", desc, repo=full, url=url))
+                evidence.append(ev("description", desc, repo=full, url = url))
             if readme:
-                evidence.append(ev("readme", readme[:2000], repo=full, url=url))
+                evidence.append(ev("readme", readme[:2000], repo = full, url = url))
             if not evidence:
-                evidence.append(ev("name", repo["name"], repo=full, url=url))
+                evidence.append(ev("name", repo["name"], repo = full, url = url))
 
             langs = repo.get("_languages") or {}
             for lang, count in langs.items():
                 language_totals[lang] = language_totals.get(lang, 0) + int(count)
 
             claims.append(Claim(
-                kind=ClaimKind.PROJECT,
-                value=repo["name"],
-                attributes={
+                kind = ClaimKind.PROJECT,
+                value = repo["name"],
+                attributes = {
                     "repo": full,
                     "url": url,
                     "homepage": repo.get("homepage") or None,
@@ -227,15 +224,15 @@ class GitHubClient:
                     "primary_language": repo.get("language"),
                     "pushed_at": repo.get("pushed_at"),
                 },
-                evidence=evidence,
+                evidence = evidence,
             ))
 
-        for lang, total in sorted(language_totals.items(), key=lambda kv: -kv[1]):
+        for lang, total in sorted(language_totals.items(), key = lambda kv: -kv[1]):
             claims.append(Claim(
-                kind=ClaimKind.SKILL,
-                value=lang,
-                attributes={"bytes": total, "origin": "github_languages"},
-                evidence=[ev("language", f"{lang} used across {login}'s repositories")],
+                kind = ClaimKind.SKILL,
+                value = lang,
+                attributes = {"bytes": total, "origin": "github_languages"},
+                evidence = [ev("language", f"{lang} used across {login}'s repositories")],
             ))
 
         return claims
@@ -267,9 +264,6 @@ class GitHubClient:
                 "updated": (repo.get("pushed_at") or "")[:10],
             })
         return out
-
-
-
 
     def analytics(self, payload: dict[str, Any]) -> dict[str, Any]:
         """Aggregate numbers for the GitHub Analytics section of the portfolio."""
